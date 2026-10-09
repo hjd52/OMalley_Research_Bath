@@ -1,169 +1,51 @@
+# -*- coding: utf-8 -*-
+########################################################
+# MDANSE Angular Correlation Function Batch Script (MTO)
+# Compatible with Python 2.7
+########################################################
+
 from MDANSE import REGISTRY
 
-#Run in MDANSE command shell, likely found in downloads/Windows_executable_nightly/MDANSE\MDANSE_command_shell#
-
-#Don't change anything not commented#
-
 ################################################################
-# Job parameters                                               #
+# User Parameters — Change these as needed
 ################################################################
 
-parameters = {}
-parameters['axis_selection'] = '1' #You'll need to open mdanse gui, open your trajectory file as .nc, open 'analysis > dynamics > Angular Correlation Function'#
-                                   #select new definition and the atoms you want. Call the definition 1 2 3 etc for best compatibility with this template script.#
-                                   
-parameters['frames'] = (0, 999, 1) #(starting frame, final frame, step size)#
-parameters['output_files'] = (u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\rot\\1', (u'hdf',)) #Change to your file path
-parameters['per_axis'] = False
-parameters['running_mode'] = ('monoprocessor',)
-parameters['trajectory'] = u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\bea2%.nc' #Change to your file path
+trajectory_path = u'C:\\Users\\gd478\\Documents\\phd_yr4\\MD\\correct\\12percwateroneperc5fu\\200ps_rot\\FIELD.nc'
+output_folder   = u'C:\\Users\\gd478\\Documents\\phd_yr4\\MD\\correct\\12percwateroneperc5fu\\200ps_rot\\rot\\'
+
+axes            = ['1', '2', '3']   # axis definitions from MDANSE GUI
+segment_length  = 100               # number of frames per segment
+segment_step    = 100               # overlap step (start increment)
+final_frame     = 2000              # last frame index
+frame_stride    = 1                 # frame stride within a segment
+running_mode    = ('monoprocessor',)
+per_axis        = False
 
 ################################################################
-# Setup and run the analysis                                   #
+# Automated Loop — Multiple Time Origins (MTO)
 ################################################################
 
-ac = REGISTRY['job']['ac']()
-ac.run(parameters,status=True) 
+segment_count = 0
 
-#Second AC job starts below, I have it calculating the acf for another axis over the same frames 0-999. AC jobs separated by '#' below#
+for start in range(0, final_frame - segment_length + 1, segment_step):
+    end = start + segment_length - 1
 
-parameters = {}
-parameters['axis_selection'] = '2'
-parameters['frames'] = (0, 999, 1)
-parameters['output_files'] = (u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\rot\\2', (u'hdf',))
-parameters['per_axis'] = False
-parameters['running_mode'] = ('monoprocessor',)
-parameters['trajectory'] = u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\bea2%.nc'
+    for axis in axes:
+        segment_count += 1
+        output_file = output_folder + unicode(segment_count)  # Python 2: use unicode()
 
-ac = REGISTRY['job']['ac']()
-ac.run(parameters,status=True)
+        parameters = {
+            'axis_selection': axis,
+            'frames': (start, end, frame_stride),
+            'output_files': (output_file, (u'hdf',)),
+            'per_axis': per_axis,
+            'running_mode': running_mode,
+            'trajectory': trajectory_path
+        }
 
-#
+        print "Running ACF for axis %s, frames %d-%d, output %d.hdf" % (axis, start, end, segment_count)
 
-parameters = {}
-parameters['axis_selection'] = '3'
-parameters['frames'] = (0, 999, 1)
-parameters['output_files'] = (u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\rot\\3', (u'hdf',))
-parameters['per_axis'] = False
-parameters['running_mode'] = ('monoprocessor',)
-parameters['trajectory'] = u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\bea2%.nc'
+        ac = REGISTRY['job']['ac']()
+        ac.run(parameters, status=True)
 
-ac = REGISTRY['job']['ac']()
-ac.run(parameters,status=True)
-
-#
-
-parameters = {}
-parameters['axis_selection'] = '1'
-parameters['frames'] = (1000, 1999, 1)
-parameters['output_files'] = (u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\rot\\4', (u'hdf',))
-parameters['per_axis'] = False
-parameters['running_mode'] = ('monoprocessor',)
-parameters['trajectory'] = u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\bea2%.nc'
-
-ac = REGISTRY['job']['ac']()
-ac.run(parameters,status=True)
-
-#
-
-parameters = {}
-parameters['axis_selection'] = '2'
-parameters['frames'] = (1000, 1999, 1)
-parameters['output_files'] = (u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\rot\\5', (u'hdf',))
-parameters['per_axis'] = False
-parameters['running_mode'] = ('monoprocessor',)
-parameters['trajectory'] = u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\bea2%.nc'
-
-ac = REGISTRY['job']['ac']()
-ac.run(parameters,status=True)
-
-#
-
-parameters = {}
-parameters['axis_selection'] = '3'
-parameters['frames'] = (1000, 1999, 1)
-parameters['output_files'] = (u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\rot\\6', (u'hdf',))
-parameters['per_axis'] = False
-parameters['running_mode'] = ('monoprocessor',)
-parameters['trajectory'] = u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\bea2%.nc'
-
-ac = REGISTRY['job']['ac']()
-ac.run(parameters,status=True)
-
-#
-
-parameters = {}
-parameters['axis_selection'] = '1'
-parameters['frames'] = (2000, 2999, 1)
-parameters['output_files'] = (u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\rot\\7', (u'hdf',))
-parameters['per_axis'] = False
-parameters['running_mode'] = ('monoprocessor',)
-parameters['trajectory'] = u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\bea2%.nc'
-
-ac = REGISTRY['job']['ac']()
-ac.run(parameters,status=True)
-
-#
-
-parameters = {}
-parameters['axis_selection'] = '2'
-parameters['frames'] = (2000, 2999, 1)
-parameters['output_files'] = (u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\rot\\8', (u'hdf',))
-parameters['per_axis'] = False
-parameters['running_mode'] = ('monoprocessor',)
-parameters['trajectory'] = u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\bea2%.nc'
-
-ac = REGISTRY['job']['ac']()
-ac.run(parameters,status=True)
-
-#
-
-parameters = {}
-parameters['axis_selection'] = '3'
-parameters['frames'] = (2000, 2999, 1)
-parameters['output_files'] = (u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\rot\\9', (u'hdf',))
-parameters['per_axis'] = False
-parameters['running_mode'] = ('monoprocessor',)
-parameters['trajectory'] = u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\bea2%.nc'
-
-ac = REGISTRY['job']['ac']()
-ac.run(parameters,status=True)
-
-#
-
-parameters = {}
-parameters['axis_selection'] = '1'
-parameters['frames'] = (3000, 3999, 1)
-parameters['output_files'] = (u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\rot\\10', (u'hdf',))
-parameters['per_axis'] = False
-parameters['running_mode'] = ('monoprocessor',)
-parameters['trajectory'] = u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\bea2%.nc'
-
-ac = REGISTRY['job']['ac']()
-ac.run(parameters,status=True)
-
-#
-
-parameters = {}
-parameters['axis_selection'] = '2'
-parameters['frames'] = (3000, 3999, 1)
-parameters['output_files'] = (u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\rot\\11', (u'hdf',))
-parameters['per_axis'] = False
-parameters['running_mode'] = ('monoprocessor',)
-parameters['trajectory'] = u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\bea2%.nc'
-
-ac = REGISTRY['job']['ac']()
-ac.run(parameters,status=True)
-
-#
-
-parameters = {}
-parameters['axis_selection'] = '3'
-parameters['frames'] = (3000, 3999, 1)
-parameters['output_files'] = (u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\rot\\12', (u'hdf',))
-parameters['per_axis'] = False
-parameters['running_mode'] = ('monoprocessor',)
-parameters['trajectory'] = u'C:\\Users\\gd478\\Documents\\phd_yr2\\MD\\For_ILL+PSI\\building\\loaded\\bea\\2%\\20ps_post_prod\\bea2%.nc'
-
-ac = REGISTRY['job']['ac']()
-ac.run(parameters,status=True)
+print "\nCompleted %d ACF analyses using the MTO method.\n" % segment_count
