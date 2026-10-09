@@ -1,0 +1,1277 @@
+"""
+build_workbook.py
+=================
+Builds the complete QENS / MD analysis workbook from scratch.
+
+HOW TO RUN:
+    python3 build_workbook.py
+    Requires:  pip install openpyxl
+
+OUTPUT:
+    QENS_MD_Analysis.xlsx  at OUTPUT_PATH below.
+
+═══════════════════════════════════════════════════════════════
+HOW TO ADD A NEW SYSTEM  (e.g. mesoporous zeolite + ethanol)
+═══════════════════════════════════════════════════════════════
+1.  If your new system has a new Q grid, add it to the Q GRIDS
+    section below (e.g.  Q_MESO = [0, 0.2, 0.35, ...]).
+
+2.  Add one tuple to the SYSTEMS list:
+        ("Fit_Meso_EtOH", "Meso-ZSM-5 / Ethanol",
+         "Meso-ZSM-5", "Ethanol", Q_MESO)
+    This creates BOTH a QENS fitting sheet AND an MD fitting
+    sheet automatically.
+
+3.  Re-run the script.  All data/comparison sheets update too.
+
+═══════════════════════════════════════════════════════════════
+HOW TO ADD A NEW MODEL
+═══════════════════════════════════════════════════════════════
+For an EISF model:
+    1. Add its name string to EISF_MODELS.
+    2. Add a branch in eisf_ifs() before the TRUE,0 fallback.
+    3. Add a row to the EISF plot table in build_models_sheet().
+
+For a HWHM model:
+    1. Add its name string to HWHM_MODELS.
+    2. Add a branch in hwhm_ifs().
+    3. Add a parameter row in the hwhm_g1_params / hwhm_g2_params
+       lists inside build_fit_sheet() if your model needs a new
+       parameter not already present.
+    4. Add a row to the HWHM plot table in build_models_sheet().
+"""
+
+# ── standard library ─────────────────────────────────────────────────────────
+import math
+import os
+
+# ── third-party (pip install openpyxl) ───────────────────────────────────────
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
+
+# ════════════════════════════════════════════════════════════════════════════
+# OUTPUT PATH  — change this if you want the file somewhere else
+# ════════════════════════════════════════════════════════════════════════════
+OUTPUT_PATH = "/mnt/e/PhD/neutron_experiments/QENS_MD_Analysis_dec25_meso_redo.xlsx"
+
+# ════════════════════════════════════════════════════════════════════════════
+# Q GRIDS
+# Add new grids here as plain Python lists.
+# These are used both to pre-populate the Systems sheet reference table
+# and as the DEFAULT Q values written into new fitting sheets.
+# Each fitting sheet's Q column is user-editable (blue cells), so you can
+# always overwrite them for a different dataset without touching this script.
+# ════════════════════════════════════════════════════════════════════════════
+Q_HY = [
+    0, 0.21632976, 0.324847579, 0.53821482, 0.668056881, 0.79438135,
+    0.892462881, 1.010777344, 1.230829778, 1.350689361, 1.483175476,
+    1.574103919, 1.645503799, 1.741550207, 1.798227487,
+]
+
+Q_HZSM5 = [
+    0, 0.243537961, 0.297810745, 0.351815874, 0.405524106, 0.458890116,
+    0.69362572, 0.79438135, 0.892462881, 0.987517504, 1.079252871,
+    1.16733184, 1.251483514, 1.350691278, 1.442776752, 1.510990434,
+]
+
+Q_MD = [round(i * 0.1, 1) for i in range(19)]   # 0.0 to 1.8 Å⁻¹
+
+# ════════════════════════════════════════════════════════════════════════════
+# SYSTEMS
+# Each entry is:
+#   (sheet_name, long_name, zeolite_label, molecule_label, q_grid)
+# Add a new tuple here to create a new fitting sheet automatically.
+# sheet_name   : Excel tab name (no spaces, max ~28 chars)
+# long_name    : human-readable title shown in the sheet header
+# zeolite_label: shown in headers and data table banners
+# molecule_label: shown in headers
+# q_grid       : the default Q values written into the Q column (editable later)
+# ════════════════════════════════════════════════════════════════════════════
+SYSTEMS = [
+    ("Fit_HZSM5_EtOH",  "H-ZSM-5 / Ethanol",  "H-ZSM-5", "Ethanol",  Q_HZSM5),
+    ("Fit_HZSM5_PrOH",  "H-ZSM-5 / Propanol", "H-ZSM-5", "Propanol", Q_HZSM5),
+    ("Fit_HY_EtOH",     "H-Y / Ethanol",       "H-Y",      "Ethanol",  Q_HY),
+]
+
+TEMPS = [290, 330, 370]   # temperatures in K — add more if needed
+
+# ════════════════════════════════════════════════════════════════════════════
+# MODELS
+# ════════════════════════════════════════════════════════════════════════════
+# EISF_MODELS : list of model names shown in the dropdown.
+#   Each name must have a matching branch in eisf_ifs() below.
+#
+# HWHM_MODELS : same for linewidth models.
+#   Each name must have a matching branch in hwhm_ifs() below.
+#
+# TO ADD A NEW MODEL:
+#   1. Add its name to the list here.
+#   2. Add a branch to the relevant IFS function below.
+#   3. Add a row to the Models sheet table in build_models_sheet() if you want
+#      a written description there too.
+# ════════════════════════════════════════════════════════════════════════════
+EISF_MODELS = [
+    "Isotropic Rotation",
+    "3-Site Jump",
+    "Uniaxial N-fold",
+    "Diffusion in Sphere",
+    "Diffusion on Sphere",
+    "Fixed (EISF=1)",
+]
+
+HWHM_MODELS = [
+    "Chudley-Elliott",
+    "Hall-Ross",
+    "Singwi-Sjolander",
+    "Q-Independent (rotation)",
+]
+
+# ────────────────────────────────────────────────────────────────────────────
+# eisf_ifs()
+# Returns an Excel formula string for the EISF at a given Q.
+#
+# Arguments:
+#   mdl_addr : Excel address of the EISF model dropdown cell, e.g. "$B$7"
+#   q_addr   : Excel address of the Q value cell in the data row, e.g. "A37"
+#              (this is a relative reference so formulas are draggable)
+#   a_addr   : Excel address of the geometry parameter a (absolute), e.g. "$B$14"
+#   N_addr   : Excel address of the N-fold integer parameter (absolute)
+#
+# HOW TO ADD A NEW EISF MODEL:
+#   1. Add its name string to EISF_MODELS above.
+#   2. Write the Excel formula as a Python string using the address variables.
+#      Use q_addr wherever Q appears (keeps it draggable).
+#   3. Add a new line to the IFS string following the same pattern as the others:
+#         f'{mdl_addr}="My New Model", <formula>,'
+#      Insert it before the final TRUE,0 fallback line.
+# ────────────────────────────────────────────────────────────────────────────
+def eisf_ifs(mdl_addr, q_addr, a_addr, N_addr):
+    """
+    Build the full IFS Excel formula for EISF.
+    q_addr is a relative cell reference (e.g. 'A37') so the formula is
+    draggable down the Q column without breaking.
+    Returns '=1' at Q=0 rows (handled by the Q=0 guard in build_fit_sheet).
+    """
+    q = q_addr   # shorthand
+
+    # ── Isotropic Rotation (Sears): [sin(Qa)/Qa]^2 ──────────────────────────
+    iso = (
+        f"(SIN({q}*{a_addr})/({q}*{a_addr}))^2"
+    )
+
+    # ── 3-Site Jump: (1/3)*(1 + 2*j0(Q*a*sqrt(3))) ──────────────────────────
+    ts = (
+        f"(1/3)*(1+2*(SIN({q}*{a_addr}*SQRT(3))/({q}*{a_addr}*SQRT(3))))"
+    )
+
+    # ── Uniaxial N-fold rotation ─────────────────────────────────────────────
+    # A0 = (1/N) * sum_{j=0}^{N-1} j0(2*Q*a*sin(pi*j/N))
+    # Excel can't do symbolic sums, so we pre-expand for each allowed N.
+    # j=0 term is always j0(0) = 1.
+    # TO ADD A NEW N VALUE: add another entry to the IFS below following the
+    # same pattern as the others.
+    def uni(N_val):
+        terms = ["1"]   # j=0 → j0(0) = 1
+        for j in range(1, N_val):
+            arg = f"2*{q}*{a_addr}*SIN(PI()*{j}/{N_val})"
+            terms.append(f"SIN({arg})/({arg})")
+        return f"(1/{N_val})*({'+'.join(terms)})"
+
+    uniaxial = (
+        f"IFS({N_addr}=3,{uni(3)},{N_addr}=4,{uni(4)},"
+        f"{N_addr}=5,{uni(5)},{N_addr}=6,{uni(6)},"
+        f"{N_addr}=12,{uni(12)},TRUE,{uni(6)})"
+    )
+
+    # ── Diffusion in Sphere (Bicout-Zaccai): [3*j1(Qa)/(Qa)]^2 ─────────────
+    # j1(x) = (sin(x) - x*cos(x)) / x^2
+    qa  = f"({q}*{a_addr})"
+    j1  = f"(SIN({qa})-{qa}*COS({qa}))/({qa})^2"
+    sph = f"(3*({j1})/({qa}))^2"
+
+    # ── Diffusion on Sphere Surface: same form as isotropic rotation ─────────
+    dos = iso
+
+    # ── Fixed (completely immobile fraction) ─────────────────────────────────
+    fix = "1"
+
+    # ── Assemble IFS ─────────────────────────────────────────────────────────
+    # Pattern: model_addr="Name", formula, ...
+    # Add new models before the TRUE,0 fallback.
+    formula = (
+        f'=IFS('
+        f'{mdl_addr}="Isotropic Rotation",{iso},'
+        f'{mdl_addr}="3-Site Jump",{ts},'
+        f'{mdl_addr}="Uniaxial N-fold",{uniaxial},'
+        f'{mdl_addr}="Diffusion in Sphere",{sph},'
+        f'{mdl_addr}="Diffusion on Sphere",{dos},'
+        f'{mdl_addr}="Fixed (EISF=1)",{fix},'
+        f'TRUE,0)'          # fallback if dropdown value not recognised
+    )
+    return formula
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# hwhm_ifs()
+# Returns an Excel formula string for the HWHM (linewidth) at a given Q.
+#
+# Arguments:
+#   mdl_addr : Excel address of the HWHM model dropdown cell (absolute)
+#   q_addr   : Excel address of the Q value cell (relative — draggable)
+#   l_addr   : jump length l for Chudley-Elliott (absolute)
+#   lsq_addr : mean-square jump length <r²> shared by Hall-Ross and SS (absolute)
+#   tau_addr : residence time τ shared by CE, HR, and SS (absolute)
+#   rot_addr : rotational rate Omega for Q-independent model (absolute), in ps⁻¹
+#   hbar_addr: cell containing ℏ in meV·ps (absolute, shared global cell)
+#
+# Singwi-Sjolander form used here (corrected):
+#   Δω(Q) = (1/6τ) * Q²<r²> * [1 + Q²<r²>/6]⁻¹
+#   Which rearranges to:
+#   Δω(Q) = hbar * (Q²<r²>/6τ) / (1 + Q²<r²>/6)
+#   Note: <r²> = lsq_addr, τ = tau_addr
+#   This does NOT require D as a separate parameter — D emerges as <r²>/(6τ).
+#
+# HOW TO ADD A NEW HWHM MODEL:
+#   1. Add its name to HWHM_MODELS above.
+#   2. Write the Excel formula string using the address variables and q_addr.
+#   3. Add a new parameter row in the parameter block section of build_fit_sheet()
+#      if your model needs a parameter not already present.
+#   4. Add a branch here before the TRUE,0 fallback.
+# ────────────────────────────────────────────────────────────────────────────
+def hwhm_ifs(mdl_addr, q_addr, l_addr, lsq_addr, tau_addr, rot_addr, hbar_addr):
+    """
+    Build the full IFS Excel formula for HWHM linewidth.
+    q_addr is relative (draggable). All parameter addresses are absolute.
+    Returns '=0' for Q=0 rows (see build_fit_sheet Q=0 guard).
+    """
+    q = q_addr
+
+    # ── Chudley-Elliott: (ℏ/τ) * [1 - sin(Ql)/(Ql)] ────────────────────────
+    Ql = f"({q}*{l_addr})"
+    CE = f"({hbar_addr}/{tau_addr})*(1-SIN({Ql})/({Ql}))"
+
+    # ── Hall-Ross: (ℏ/τ) * [1 - exp(-Q²<r²>/6)] ────────────────────────────
+    HR = f"({hbar_addr}/{tau_addr})*(1-EXP(-({q}^2*{lsq_addr})/6))"
+
+    # ── Singwi-Sjolander (corrected form) ───────────────────────────────────
+    # Δω(Q) = hbar * (Q²<r²>/6τ) / (1 + Q²<r²>/6)
+    # Written as: hbar * Q²<r²> / (6τ + τ*Q²<r²>)   [factoring out τ]
+    # <r²> = lsq_addr, τ = tau_addr
+    # Effective diffusion coefficient: D = <r²>/(6τ) emerges naturally.
+    SS = (
+        f"({hbar_addr}*{q}^2*{lsq_addr})"
+        f"/(6*{tau_addr}+{tau_addr}*{q}^2*{lsq_addr}/6*6)"
+    )
+    # Cleaner equivalent form:
+    # numerator   = hbar * Q² * <r²>
+    # denominator = 6*tau * (1 + Q²*<r²>/6)
+    SS = (
+        f"({hbar_addr}*{q}^2*{lsq_addr})"
+        f"/(6*{tau_addr}*(1+{q}^2*{lsq_addr}/6))"
+    )
+
+    # ── Q-Independent (rotation): flat line at value Omega ──────────────────
+    # For rotational processes where HWHM does not depend on Q.
+    # rot_addr holds Omega in ps⁻¹; multiply by hbar to get meV.
+    # If your Omega is already in meV, just use rot_addr directly without hbar.
+    QIND = f"{hbar_addr}*{rot_addr}"
+
+    # ── Assemble IFS ─────────────────────────────────────────────────────────
+    formula = (
+        f'=IFS('
+        f'{mdl_addr}="Chudley-Elliott",{CE},'
+        f'{mdl_addr}="Hall-Ross",{HR},'
+        f'{mdl_addr}="Singwi-Sjolander",{SS},'
+        f'{mdl_addr}="Q-Independent (rotation)",{QIND},'
+        f'TRUE,0)'
+    )
+    return formula
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# STYLE HELPERS
+# These are thin wrappers so the sheet-building code stays readable.
+# You shouldn't need to change these unless you want different colours.
+# ════════════════════════════════════════════════════════════════════════════
+C_HDR    = "1F4E79"   # dark navy  — main headers
+C_SUBHDR = "2E75B6"   # mid blue   — sub-headers / block headers
+C_INP_BG = "DDEEFF"   # light blue — user input cells
+C_CAL_BG = "EEFFEE"   # light green— calculated output cells
+C_COM_BG = "FFF0E0"   # light orange — combined EISF column
+C_RES_BG = "FFE0E0"   # light red  — residual columns
+C_WARN   = "FFFF99"   # yellow     — model selector cells
+C_FIX    = "F2F2F2"   # light grey — fixed / non-editable
+
+C_WHT    = "FFFFFF"
+C_BLU    = "0000FF"   # text colour: free parameter
+C_GRN    = "008000"   # text colour: calculated
+C_ORG    = "C55A11"   # text colour: combined EISF
+C_RED    = "C00000"   # text colour: residual
+
+def fl(h):
+    return PatternFill("solid", start_color=h, fgColor=h)
+
+def bdr():
+    s = Side(style="thin", color="AAAAAA")
+    return Border(left=s, right=s, top=s, bottom=s)
+
+def ctr():
+    return Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+def lft():
+    return Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+def style_header(cell, text, bg=C_HDR):
+    cell.value = text
+    cell.font  = Font(name="Arial", size=10, bold=True, color=C_WHT)
+    cell.fill  = fl(bg); cell.alignment = ctr(); cell.border = bdr()
+
+def style_subhdr(cell, text):
+    cell.value = text
+    cell.font  = Font(name="Arial", size=9, bold=True, color=C_WHT)
+    cell.fill  = fl(C_SUBHDR); cell.alignment = ctr(); cell.border = bdr()
+
+def style_inp(cell, v=None):
+    if v is not None: cell.value = v
+    cell.font = Font(name="Arial", size=10, color=C_BLU)
+    cell.fill = fl(C_INP_BG); cell.alignment = ctr(); cell.border = bdr()
+
+def style_calc(cell, f=None, col=C_GRN, bg=C_CAL_BG):
+    if f is not None: cell.value = f
+    cell.font = Font(name="Arial", size=10, color=col)
+    cell.fill = fl(bg); cell.alignment = ctr(); cell.border = bdr()
+    cell.number_format = "0.00000"
+
+def style_warn(cell, v=None):
+    if v is not None: cell.value = v
+    cell.font = Font(name="Arial", size=10, bold=True)
+    cell.fill = fl(C_WARN); cell.alignment = ctr(); cell.border = bdr()
+
+def style_fix(cell, v=None):
+    if v is not None: cell.value = v
+    cell.font = Font(name="Arial", size=10, color="555555")
+    cell.fill = fl(C_FIX); cell.alignment = ctr(); cell.border = bdr()
+
+def merge_hdr(ws, rng, text, bg=C_HDR):
+    ws.merge_cells(rng)
+    c = ws[rng.split(":")[0]]
+    style_header(c, text, bg)
+
+def add_note(ws, r, c_start, text, c_end):
+    """Write italic grey note text, merging from c_start to c_end."""
+    cell = ws.cell(r, c_start)
+    cell.value = text
+    cell.font  = Font(name="Arial", size=9, italic=True, color="777777")
+    cell.alignment = lft()
+    if c_end > c_start:
+        try:
+            ws.merge_cells(
+                f"{get_column_letter(c_start)}{r}:"
+                f"{get_column_letter(c_end)}{r}"
+            )
+        except Exception:
+            pass
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# FITTING SHEET COLUMN LAYOUT
+# Each temperature block is BW columns wide.
+# Offsets within a block (0-indexed):
+#  0  Q                 — user-editable (blue); formulas reference this column
+#  1  EISF data         — user input
+#  2  EISF error        — user input
+#  3  EISF P1 component — IFS calc (green), model 1 unweighted
+#  4  EISF P2 component — IFS calc (green), model 2 unweighted
+#  5  EISF combined     — (1-p)+p[(1-f)P1+fP2]  (orange)
+#  6  EISF residual     — data - combined  (red)
+#  7  G1 data           — user input
+#  8  G1 error          — user input
+#  9  G1 calc           — IFS calc (green)
+# 10  G1 residual       — red
+# 11  G2 data           — user input
+# 12  G2 error          — user input
+# 13  G2 calc           — IFS calc (green)
+# 14  G2 residual       — red
+# ════════════════════════════════════════════════════════════════════════════
+BW = 15   # block width in columns
+
+COL_HEADERS = [
+    "Q\n(Å⁻¹)\n[editable]",
+    "EISF\ndata", "EISF\nerr",
+    "EISF P1\n(unwt)", "EISF P2\n(unwt)",
+    "EISF combined\n(fits data)",
+    "EISF\nresid",
+    "Γ1 data\n(meV)", "Γ1 err",
+    "Γ1 calc\n(meV)", "Γ1 resid",
+    "Γ2 data\n(meV)", "Γ2 err",
+    "Γ2 calc\n(meV)", "Γ2 resid",
+]
+
+# ════════════════════════════════════════════════════════════════════════════
+# PARAMETER BLOCK ROW OFFSETS (relative to BASE+2)
+# These define where each label/input row sits in the parameter section.
+# If you add parameters, insert new offsets and shift everything below them.
+#
+# Section banners are at offsets: 0, 6, 13, 19, 25, 30(data header)
+# PARAM_ROWS = total parameter rows before data starts (currently 31)
+# ════════════════════════════════════════════════════════════════════════════
+#  0  ── MODEL SELECTORS ──
+#  1  No. Lorentzians
+#  2  EISF Model P1
+#  3  EISF Model P2
+#  4  HWHM Model G1
+#  5  HWHM Model G2
+#  6  ── EISF PARAMETERS ──
+#  7  p_total
+#  8  f
+#  9  a1
+# 10  N1
+# 11  a2
+# 12  N2
+# 13  ── HWHM G1 PARAMETERS ──
+# 14  l1  (CE jump length)
+# 15  lsq1 (<r²> for HR and SS)
+# 16  tau1 (residence time — CE, HR, SS)
+# 17  Omega1 (rotational rate — Q-independent)
+# 18  [spare G1 row]
+# 19  ── HWHM G2 PARAMETERS ──
+# 20  l2
+# 21  lsq2
+# 22  tau2
+# 23  Omega2
+# 24  [spare G2 row]
+# 25  ── GOODNESS OF FIT ──
+# 26  chi-sq EISF
+# 27  chi-sq G1
+# 28  chi-sq G2
+# 29  [spacer]
+# 30  ── DATA TABLE HEADER ──
+# 31+ Q data rows
+PARAM_ROWS = 31   # data rows start at BASE + 2 + PARAM_ROWS
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# build_fit_sheet()
+# Creates one fitting sheet for one system (e.g. H-ZSM-5 / Ethanol).
+# Called once per entry in SYSTEMS.
+# ════════════════════════════════════════════════════════════════════════════
+def build_fit_sheet(wb, sheet_name, sys_long, zeolite, molecule,
+                    q_grid, insert_before="QENS_EISF"):
+    """
+    wb           : openpyxl Workbook object
+    sheet_name   : tab name
+    sys_long     : long system name for the title bar
+    zeolite      : zeolite label
+    molecule     : molecule label
+    q_grid       : list of default Q values (user can overwrite in the sheet)
+    insert_before: name of sheet to insert before (keeps tab order clean)
+    """
+    idx = wb.sheetnames.index(insert_before)
+    ws  = wb.create_sheet(sheet_name, idx)
+    nq  = len(q_grid)
+    tc  = BW * len(TEMPS)      # total columns across all temperature blocks
+    BASE = 3                   # row where temperature blocks start
+
+    # ── column widths ─────────────────────────────────────────────────────
+    for i in range(1, tc + 3):
+        ws.column_dimensions[get_column_letter(i)].width = 7.8
+    # Q column in each block is slightly wider
+    for ti in range(len(TEMPS)):
+        ws.column_dimensions[get_column_letter(ti * BW + 1)].width = 11.0
+
+    ws.row_dimensions[1].height = 26
+
+    # ── sheet title ───────────────────────────────────────────────────────
+    ws.merge_cells(f"A1:{get_column_letter(tc)}1")
+    style_header(ws["A1"],
+                 f"FITTING  —  {sys_long}  ({zeolite} / {molecule})",
+                 C_HDR)
+
+    # ── global ℏ cell (row 2, columns 1-2) ───────────────────────────────
+    # All HWHM formulas reference this cell with an absolute address $B$2.
+    # Change the value here if you want different units.
+    ws.cell(2, 1).value = "ℏ  (meV·ps)"
+    ws.cell(2, 1).font  = Font(name="Arial", size=10, bold=True)
+    ws.cell(2, 1).alignment = lft()
+    style_inp(ws.cell(2, 2), 0.6582)
+    HBAR = "$B$2"   # absolute reference used in all HWHM formulas
+
+    # ══════════════════════════════════════════════════════════════════════
+    # TEMPERATURE BLOCKS
+    # ══════════════════════════════════════════════════════════════════════
+    for ti, T in enumerate(TEMPS):
+        co = ti * BW + 1    # 1-indexed column where this block starts
+
+        # helper: absolute row for a parameter at offset `off`
+        def pr(off):
+            return BASE + 2 + off
+
+        # helper: column letter at offset `dc` within this block
+        def ca(dc):
+            return get_column_letter(co + dc)
+
+        # helper: absolute cell address for parameter column B (col co+1)
+        def fa(off):
+            return f"${get_column_letter(co+1)}${pr(off)}"
+
+        # ── block header ──────────────────────────────────────────────────
+        ws.merge_cells(f"{ca(0)}{BASE}:{ca(BW-1)}{BASE}")
+        style_header(ws[f"{ca(0)}{BASE}"], f"T = {T} K", C_SUBHDR)
+        ws.row_dimensions[BASE].height = 18
+
+        # ── column sub-headers ────────────────────────────────────────────
+        ws.row_dimensions[BASE+1].height = 48
+        for ci2, ht in enumerate(COL_HEADERS):
+            c = ws.cell(BASE + 1, co + ci2)
+            style_subhdr(c, ht)
+            # special colours for combined and residual column headers
+            if ci2 == 5:
+                c.fill = fl("8B4513")
+            elif ci2 in [6, 10, 14]:
+                c.fill = fl("7B0000")
+
+        # ── section banners ───────────────────────────────────────────────
+        # These are the grey divider rows between parameter groups.
+        # Adjust the (offset, text) pairs if you add parameter sections.
+        sections = [
+            (0,  "MODEL SELECTORS"),
+            (6,  "EISF PARAMETERS"),
+            (13, "HWHM PARAMETERS — GAMMA 1"),
+            (19, "HWHM PARAMETERS — GAMMA 2"),
+            (25, "GOODNESS OF FIT"),
+        ]
+        for off, txt in sections:
+            r = pr(off)
+            ws.merge_cells(f"{ca(0)}{r}:{ca(BW-1)}{r}")
+            c = ws.cell(r, co)
+            c.value = txt
+            c.font  = Font(name="Arial", size=9, bold=True, color=C_BLU)
+            c.fill  = fl("EEF4FF")
+            c.alignment = lft()
+            c.border = bdr()
+            ws.row_dimensions[r].height = 13
+
+        # ── model selectors (rows 1-5 within selector section) ────────────
+        # TO ADD A NEW MODEL: add its name to EISF_MODELS or HWHM_MODELS
+        # at the top of this file, then add a branch in eisf_ifs/hwhm_ifs.
+        sel_rows = [
+            (1, "No. Lorentzians",   2,            None,
+             "1 or 2.  For 1 Lorentzian: set f = 0"),
+            (2, "EISF Model P1",     EISF_MODELS[0], EISF_MODELS,
+             "slower / localised process — drives EISF P1 column"),
+            (3, "EISF Model P2",     EISF_MODELS[1], EISF_MODELS,
+             "faster / diffusive process — drives EISF P2 column"),
+            (4, "HWHM Model G1",     HWHM_MODELS[0], HWHM_MODELS,
+             "drives Γ1 calc column — change dropdown to switch formula live"),
+            (5, "HWHM Model G2",     HWHM_MODELS[0], HWHM_MODELS,
+             "drives Γ2 calc column — can differ from G1 model"),
+        ]
+        for off, txt, default, choices, note_txt in sel_rows:
+            r = pr(off)
+            lc = ws.cell(r, co)
+            lc.value = txt
+            lc.font  = Font(name="Arial", size=10, bold=True)
+            lc.alignment = lft(); lc.border = bdr()
+            style_warn(ws.cell(r, co + 1), default)
+            if choices:
+                dv = DataValidation(
+                    type="list",
+                    formula1='"' + ",".join(choices) + '"',
+                    allow_blank=False,
+                )
+                ws.add_data_validation(dv)
+                dv.add(ws.cell(r, co + 1))
+            add_note(ws, r, co + 2, note_txt, co + BW - 1)
+
+        # absolute addresses of model selector cells
+        M1  = fa(2)    # EISF P1 model
+        M2  = fa(3)    # EISF P2 model
+        MH1 = fa(4)    # HWHM G1 model
+        MH2 = fa(5)    # HWHM G2 model
+
+        # ── EISF parameters ───────────────────────────────────────────────
+        eisf_params = [
+            (7,  "p_total  (mobile fraction)",  0.80,
+             "First estimate: the plateau of A0(Q) at high Q ≈ (1−p)"),
+            (8,  "f  (weight of P2)",           0.30,
+             "0 = all Process 1,  1 = all Process 2.  Set f=0 for single Lorentzian"),
+            (9,  "a1  geometry P1  (Å)",        1.50,
+             "radius, jump length etc.  Interpretation depends on P1 model"),
+            (10, "N1  fold  (uniaxial P1)",     6,
+             "integer: 3, 4, 5, 6 or 12  —  only used when P1 = Uniaxial N-fold"),
+            (11, "a2  geometry P2  (Å)",        2.00,
+             "geometry parameter for P2 model"),
+            (12, "N2  fold  (uniaxial P2)",     3,
+             "integer: 3, 4, 5, 6 or 12  —  only used when P2 = Uniaxial N-fold"),
+        ]
+        for off, txt, default, note_txt in eisf_params:
+            r = pr(off)
+            lc = ws.cell(r, co)
+            lc.value = txt
+            lc.font  = Font(name="Arial", size=10)
+            lc.alignment = lft(); lc.border = bdr()
+            style_inp(ws.cell(r, co + 1), default)
+            add_note(ws, r, co + 2, note_txt, co + BW - 1)
+
+        # absolute addresses of EISF parameter cells
+        P  = fa(7)    # p_total
+        F  = fa(8)    # f weighting
+        A1 = fa(9)    # a1 geometry P1
+        N1 = fa(10)   # N1 fold P1
+        A2 = fa(11)   # a2 geometry P2
+        N2 = fa(12)   # N2 fold P2
+
+        # ── HWHM G1 parameters ────────────────────────────────────────────
+        # TO ADD A NEW HWHM PARAMETER: add a row here, add a new offset
+        # constant in the offsets section at the top of this file, and
+        # update hwhm_ifs() to use it.
+        hwhm_g1_params = [
+            (14, "l1  jump length G1  (Å)",        2.0,
+             "Chudley-Elliott — jump distance"),
+            (15, "⟨r²⟩1  mean-sq jump G1  (Å²)",   4.0,
+             "Hall-Ross and Singwi-Sjolander — mean-square jump length"),
+            (16, "τ1  res. time G1  (ps)",           5.0,
+             "Chudley-Elliott, Hall-Ross, and Singwi-Sjolander — residence time"),
+            (17, "Ω1  rot. rate G1  (ps⁻¹)",        0.2,
+             "Q-Independent (rotation) — rotational rate; HWHM = ℏ·Ω"),
+        ]
+        for off, txt, default, note_txt in hwhm_g1_params:
+            r = pr(off)
+            lc = ws.cell(r, co)
+            lc.value = txt
+            lc.font  = Font(name="Arial", size=10)
+            lc.alignment = lft(); lc.border = bdr()
+            style_inp(ws.cell(r, co + 1), default)
+            add_note(ws, r, co + 2, note_txt, co + BW - 1)
+
+        L1   = fa(14)   # l1 jump length (CE)
+        LSQ1 = fa(15)   # <r²>1 (HR and SS)
+        TAU1 = fa(16)   # τ1 (CE, HR, SS)
+        ROT1 = fa(17)   # Ω1 rotational rate (Q-independent)
+
+        # ── HWHM G2 parameters ────────────────────────────────────────────
+        hwhm_g2_params = [
+            (20, "l2  jump length G2  (Å)",        1.5,
+             "Chudley-Elliott"),
+            (21, "⟨r²⟩2  mean-sq jump G2  (Å²)",   2.0,
+             "Hall-Ross and Singwi-Sjolander"),
+            (22, "τ2  res. time G2  (ps)",           1.0,
+             "Chudley-Elliott, Hall-Ross, and Singwi-Sjolander"),
+            (23, "Ω2  rot. rate G2  (ps⁻¹)",        0.5,
+             "Q-Independent (rotation)"),
+        ]
+        for off, txt, default, note_txt in hwhm_g2_params:
+            r = pr(off)
+            lc = ws.cell(r, co)
+            lc.value = txt
+            lc.font  = Font(name="Arial", size=10)
+            lc.alignment = lft(); lc.border = bdr()
+            style_inp(ws.cell(r, co + 1), default)
+            add_note(ws, r, co + 2, note_txt, co + BW - 1)
+
+        L2   = fa(20)
+        LSQ2 = fa(21)
+        TAU2 = fa(22)
+        ROT2 = fa(23)
+
+        # ── chi-sq placeholders ───────────────────────────────────────────
+        for off, txt in [(26, "χ² EISF"), (27, "χ² Γ1"), (28, "χ² Γ2")]:
+            r = pr(off)
+            lc = ws.cell(r, co)
+            lc.value = txt
+            lc.font  = Font(name="Arial", size=10, bold=True)
+            lc.alignment = lft(); lc.border = bdr()
+            style_calc(ws.cell(r, co + 1))   # formula added after data rows
+
+        # ── data table header ─────────────────────────────────────────────
+        r_dh = pr(30)
+        ws.merge_cells(f"{ca(0)}{r_dh}:{ca(BW-1)}{r_dh}")
+        c = ws.cell(r_dh, co)
+        c.value = (
+            f"Q-DATA TABLE  —  {zeolite} / {molecule}  /  {T} K  "
+            f"(Q column is editable — paste your Q values here)"
+        )
+        c.font  = Font(name="Arial", size=9, bold=True)
+        c.fill  = fl("D9E1F2"); c.alignment = lft(); c.border = bdr()
+
+        # ══════════════════════════════════════════════════════════════════
+        # DATA ROWS
+        # Row structure: Q | EISF data | EISF err | P1 | P2 | combined |
+        #                resid | G1 data | G1 err | G1 calc | G1 resid |
+        #                G2 data | G2 err | G2 calc | G2 resid
+        # ══════════════════════════════════════════════════════════════════
+        DS = BASE + 2 + PARAM_ROWS   # absolute row index where data starts
+
+        # Column letter references (for formula strings and chi-sq ranges)
+        cQ   = ca(0)    # Q values — formulas reference this as the Q address
+        cED  = ca(1);  cEE = ca(2)    # EISF data, error
+        cP1  = ca(3);  cP2 = ca(4)   # P1 and P2 components
+        cCO  = ca(5);  cER = ca(6)   # combined, residual
+        cG1D = ca(7);  cG1E= ca(8)   # G1 data, error
+        cG1C = ca(9);  cG1R= ca(10)  # G1 calc, residual
+        cG2D = ca(11); cG2E= ca(12)  # G2 data, error
+        cG2C = ca(13); cG2R= ca(14)  # G2 calc, residual
+
+        for qi, q in enumerate(q_grid):
+            r   = DS + qi
+            # q_cell_addr is the RELATIVE address of the Q value in this row.
+            # Because it is relative, the EISF and HWHM formulas can be
+            # dragged down the column and will update automatically.
+            q_cell = f"{cQ}{r}"
+
+            # Q column — blue/editable so user can overwrite with any Q grid
+            style_inp(ws.cell(r, co + 0), q)
+            ws.cell(r, co + 0).number_format = "0.000000"
+
+            # EISF data and error — user input
+            style_inp(ws.cell(r, co + 1))
+            style_inp(ws.cell(r, co + 2))
+
+            # ── EISF P1 component ─────────────────────────────────────────
+            # Guard Q=0: all EISF models return 1 at Q=0, so we write 1
+            # explicitly. For Q>0 we write the full IFS formula.
+            # The q_cell reference (e.g. "A37") is RELATIVE so the formula
+            # is draggable — if you drag it to another row the Q reference
+            # updates automatically.
+            if q == 0:
+                style_calc(ws.cell(r, co + 3), "=1")
+            else:
+                style_calc(ws.cell(r, co + 3),
+                           eisf_ifs(M1, q_cell, A1, N1))
+
+            # ── EISF P2 component ─────────────────────────────────────────
+            if q == 0:
+                style_calc(ws.cell(r, co + 4), "=1")
+            else:
+                style_calc(ws.cell(r, co + 4),
+                           eisf_ifs(M2, q_cell, A2, N2))
+
+            # ── EISF combined: (1-p) + p*[(1-f)*P1 + f*P2] ───────────────
+            cc = ws.cell(r, co + 5)
+            cc.value = (
+                f"=(1-{P})+{P}*((1-{F})*{cP1}{r}+{F}*{cP2}{r})"
+            )
+            cc.font  = Font(name="Arial", size=10, color=C_ORG)
+            cc.fill  = fl(C_COM_BG)
+            cc.alignment = ctr(); cc.border = bdr()
+            cc.number_format = "0.00000"
+
+            # ── EISF residual: data − combined ────────────────────────────
+            rc = ws.cell(r, co + 6)
+            rc.value = f'=IF({cED}{r}="","",{cED}{r}-{cCO}{r})'
+            rc.font  = Font(name="Arial", size=10, color=C_RED)
+            rc.fill  = fl(C_RES_BG)
+            rc.alignment = ctr(); rc.border = bdr()
+            rc.number_format = "0.00000"
+
+            # G1 data and error
+            style_inp(ws.cell(r, co + 7))
+            style_inp(ws.cell(r, co + 8))
+
+            # ── G1 calc ───────────────────────────────────────────────────
+            if q == 0:
+                style_calc(ws.cell(r, co + 9), "=0")
+            else:
+                style_calc(ws.cell(r, co + 9),
+                           hwhm_ifs(MH1, q_cell, L1, LSQ1, TAU1, ROT1, HBAR))
+
+            # ── G1 residual ───────────────────────────────────────────────
+            g1r = ws.cell(r, co + 10)
+            g1r.value = f'=IF({cG1D}{r}="","",{cG1D}{r}-{cG1C}{r})'
+            g1r.font  = Font(name="Arial", size=10, color=C_RED)
+            g1r.fill  = fl(C_RES_BG)
+            g1r.alignment = ctr(); g1r.border = bdr()
+            g1r.number_format = "0.00000"
+
+            # G2 data and error
+            style_inp(ws.cell(r, co + 11))
+            style_inp(ws.cell(r, co + 12))
+
+            # ── G2 calc ───────────────────────────────────────────────────
+            if q == 0:
+                style_calc(ws.cell(r, co + 13), "=0")
+            else:
+                style_calc(ws.cell(r, co + 13),
+                           hwhm_ifs(MH2, q_cell, L2, LSQ2, TAU2, ROT2, HBAR))
+
+            # ── G2 residual ───────────────────────────────────────────────
+            g2r = ws.cell(r, co + 14)
+            g2r.value = f'=IF({cG2D}{r}="","",{cG2D}{r}-{cG2C}{r})'
+            g2r.font  = Font(name="Arial", size=10, color=C_RED)
+            g2r.fill  = fl(C_RES_BG)
+            g2r.alignment = ctr(); g2r.border = bdr()
+            g2r.number_format = "0.00000"
+
+        # ── chi-sq formulas ───────────────────────────────────────────────
+        # Sum of squared residuals divided by number of data points entered.
+        # Returns blank if no data has been entered yet.
+        end_row = DS + nq - 1
+        er  = f"{cER}{DS}:{cER}{end_row}"
+        ed  = f"{cED}{DS}:{cED}{end_row}"
+        g1r = f"{cG1R}{DS}:{cG1R}{end_row}"
+        g1d = f"{cG1D}{DS}:{cG1D}{end_row}"
+        g2r = f"{cG2R}{DS}:{cG2R}{end_row}"
+        g2d = f"{cG2D}{DS}:{cG2D}{end_row}"
+
+        ws.cell(pr(26), co + 1).value = (
+            f'=IFERROR(SUMPRODUCT(({er})^2)/COUNTA({ed}),"")'
+        )
+        ws.cell(pr(27), co + 1).value = (
+            f'=IFERROR(SUMPRODUCT(({g1r})^2)/COUNTA({g1d}),"")'
+        )
+        ws.cell(pr(28), co + 1).value = (
+            f'=IFERROR(SUMPRODUCT(({g2r})^2)/COUNTA({g2d}),"")'
+        )
+        for off in [26, 27, 28]:
+            style_calc(ws.cell(pr(off), co + 1))
+
+    # ── footer note ───────────────────────────────────────────────────────
+    fn = BASE + 2 + PARAM_ROWS + len(q_grid) + 2
+    ws.merge_cells(f"A{fn}:{get_column_letter(tc)}{fn}")
+    c = ws.cell(fn, 1)
+    c.value = (
+        "COLOUR KEY:  Blue = free parameter or editable Q  |  "
+        "Yellow = model selector (dropdown switches formula live)  |  "
+        "Green = EISF P1/P2 component calc  |  "
+        "Orange = EISF combined (1−p)+p[(1−f)P1+fP2]  |  "
+        "Red = residual  ||  "
+        "SINGLE LORENTZIAN: set f=0.  "
+        "Q column is editable — paste your Q values to use a different Q grid."
+    )
+    c.font = Font(name="Arial", size=9, italic=True, color="444444")
+    c.alignment = lft()
+
+    ws.sheet_properties.tabColor = "2E75B6"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# build_systems_sheet()
+# ════════════════════════════════════════════════════════════════════════════
+def build_systems_sheet(wb):
+    ws = wb.active
+    ws.title = "Systems"
+    for col, w in [("A", 28), ("B", 18), ("C", 18), ("D", 20), ("E", 32)]:
+        ws.column_dimensions[col].width = w
+    ws.row_dimensions[1].height = 28
+
+    merge_hdr(ws, "A1:E1",
+              "QENS / MD DATA ANALYSIS  —  MASTER INDEX", C_HDR)
+    for ci, h in enumerate(
+        ["System", "Zeolite", "Molecule", "Temperatures (K)", "Notes"], 1
+    ):
+        style_subhdr(ws.cell(2, ci), h)
+
+    for ri, (sname, slong, zeolite, molecule, _) in enumerate(SYSTEMS, 3):
+        for ci, val in enumerate(
+            [slong, zeolite, molecule,
+             ", ".join(str(t) for t in TEMPS), ""], 1
+        ):
+            c = ws.cell(ri, ci)
+            c.value = val
+            c.font  = Font(name="Arial", size=10)
+            c.border = bdr(); c.alignment = lft()
+
+    # Q-grid reference tables
+    row = 7
+    ws.cell(row, 1).value = "Q-axis definitions (Å⁻¹)"
+    ws.cell(row, 1).font  = Font(name="Arial", size=10, bold=True)
+
+    for label, qgrid, col in [
+        ("H-Y Q-grid",    Q_HY,    1),
+        ("H-ZSM-5 Q-grid",Q_HZSM5, 3),
+        ("MD Q-grid",     Q_MD,    5),
+    ]:
+        style_subhdr(ws.cell(row + 1, col), label)
+        for i, q in enumerate(qgrid):
+            c = ws.cell(row + 2 + i, col)
+            c.value = q; c.number_format = "0.000000"
+            c.font = Font(name="Arial", size=10)
+            c.border = bdr(); c.alignment = ctr()
+
+    # Legend
+    lr = 30
+    ws.cell(lr, 1).value = "COLOUR LEGEND"
+    ws.cell(lr, 1).font  = Font(name="Arial", size=10, bold=True)
+    for i, (bg, fg, desc) in enumerate([
+        (C_INP_BG, C_BLU, "Input / free parameter (blue text) — cells you change"),
+        (C_CAL_BG, C_GRN, "Calculated output (green text) — formula result"),
+        (C_COM_BG, C_ORG, "Combined EISF (orange) — the curve fitted to data"),
+        (C_RES_BG, C_RED, "Residual (red) — data minus calculated"),
+        (C_WARN,   "000000","Model selector (yellow) — dropdown controls formula"),
+        (C_FIX,    "555555","Fixed / non-editable reference value"),
+    ]):
+        c1 = ws.cell(lr + 1 + i, 1)
+        c1.fill = fl(bg); c1.font = Font(name="Arial", size=10, color=fg)
+        c1.value = "Sample text"; c1.border = bdr()
+        c2 = ws.cell(lr + 1 + i, 2)
+        c2.value = desc; c2.font = Font(name="Arial", size=10)
+        ws.merge_cells(f"B{lr+1+i}:E{lr+1+i}")
+
+    ws.sheet_properties.tabColor = "1F4E79"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# build_models_sheet()
+# Human-readable reference for all model expressions.
+# ════════════════════════════════════════════════════════════════════════════
+def build_models_sheet(wb):
+    ws = wb.create_sheet("Models")
+    for col, w in [("A", 32), ("B", 22), ("C", 58), ("D", 42)]:
+        ws.column_dimensions[col].width = w
+    merge_hdr(ws, "A1:D1",
+              "MODELS LIBRARY — EISF and HWHM expressions", C_HDR)
+
+    # EISF models
+    merge_hdr(ws, "A2:D2", "EISF MODELS", C_SUBHDR)
+    for ci, h in enumerate(
+        ["Model Name", "Parameter(s)", "Mathematical Form", "Physical Notes"], 1
+    ):
+        style_subhdr(ws.cell(3, ci), h)
+
+    eisf_rows = [
+        ("Isotropic Rotation (Sears)",
+         "a = radius (Å)",
+         "A0(Q) = [sin(Qa)/(Qa)]²",
+         "Spherical Bessel j0; isotropic tumbling on sphere of radius a"),
+        ("3-Site Jump Rotation",
+         "a = C–C jump distance (Å)",
+         "A0(Q) = ⅓·(1 + 2·j0(Q·a·√3))",
+         "Equilateral triangle of sites; side length a"),
+        ("Uniaxial Rotation (N-fold)",
+         "a = radius (Å),  N = fold (integer)",
+         "A0(Q) = (1/N)·Σⱼ j0(2Qa·sin(πj/N)),  j=0…N−1",
+         "Discrete N-fold jumps around rotation axis; N = 3,4,5,6,12 supported"),
+        ("Diffusion in Sphere (Bicout-Zaccai)",
+         "a = sphere radius (Å)",
+         "A0(Q) = [3·j1(Qa)/(Qa)]²,  j1(x)=(sin(x)−x·cos(x))/x²",
+         "Centre-of-mass diffusion inside a hard confining sphere"),
+        ("Diffusion on Sphere Surface",
+         "a = sphere radius (Å)",
+         "A0(Q) = [sin(Qa)/(Qa)]²",
+         "Same functional form as Sears — distinct physical picture"),
+        ("Fixed (EISF=1)",
+         "—",
+         "A0(Q) = 1",
+         "Fully immobile fraction; contributes a flat line at 1"),
+    ]
+    for i, row in enumerate(eisf_rows):
+        r = 4 + i
+        for ci, val in enumerate(row, 1):
+            c = ws.cell(r, ci)
+            c.value = val; c.font = Font(name="Arial", size=10)
+            c.border = bdr(); c.alignment = lft()
+        ws.cell(r, 1).fill = fl(C_FIX)
+        ws.row_dimensions[r].height = 26
+
+    # HWHM models
+    r_h = 12
+    merge_hdr(ws, f"A{r_h}:D{r_h}", "HWHM / LINEWIDTH MODELS", C_SUBHDR)
+    for ci, h in enumerate(
+        ["Model Name", "Parameter(s)", "Mathematical Form", "Physical Notes"], 1
+    ):
+        style_subhdr(ws.cell(r_h + 1, ci), h)
+
+    hwhm_rows = [
+        ("Chudley-Elliott",
+         "l = jump length (Å)\nτ = residence time (ps)",
+         "Γ(Q) = (ℏ/τ)·[1 − sin(Ql)/(Ql)]",
+         "Jump diffusion; Q→0 limit gives D = l²/(6τ)"),
+        ("Hall-Ross",
+         "⟨r²⟩ = mean-sq jump (Å²)\nτ = residence time (ps)",
+         "Γ(Q) = (ℏ/τ)·[1 − exp(−Q²⟨r²⟩/6)]",
+         "Gaussian distribution of jump lengths"),
+        ("Singwi-Sjolander (corrected)",
+         "⟨r²⟩ = mean-sq jump (Å²)\nτ = residence time (ps)",
+         "Γ(Q) = ℏ·Q²⟨r²⟩ / (6τ·(1 + Q²⟨r²⟩/6))\n"
+         "Effective D = ⟨r²⟩/(6τ) emerges — not a free parameter",
+         "Two-state model; uses same ⟨r²⟩ and τ as Hall-Ross for easy comparison"),
+        ("Q-Independent (rotation)",
+         "Ω = rotational rate (ps⁻¹)",
+         "Γ(Q) = ℏ·Ω  [constant, no Q dependence]",
+         "Purely rotational process; flat horizontal line in Γ vs Q plot"),
+    ]
+    for i, row in enumerate(hwhm_rows):
+        r = r_h + 2 + i
+        for ci, val in enumerate(row, 1):
+            c = ws.cell(r, ci)
+            c.value = val; c.font = Font(name="Arial", size=10)
+            c.border = bdr(); c.alignment = lft()
+        ws.cell(r, 1).fill = fl(C_FIX)
+        ws.row_dimensions[r].height = 36
+
+    # Combined EISF formula
+    r_c = r_h + 8
+    merge_hdr(ws, f"A{r_c}:D{r_c}",
+              "COMBINED EISF FORMULA (one or two components)", C_SUBHDR)
+    ws.cell(r_c + 1, 1).value = (
+        "A0(Q) = (1 − p) + p · [ (1−f)·EISF1(Q)  +  f·EISF2(Q) ]"
+    )
+    ws.cell(r_c + 1, 1).font = Font(name="Arial", size=12, bold=True,
+                                     color=C_RED)
+    ws.merge_cells(f"A{r_c+1}:D{r_c+1}")
+    ws.cell(r_c + 1, 1).alignment = ctr()
+
+    for i, (sym, meaning) in enumerate([
+        ("p", "Overall mobile fraction (0 ≤ p ≤ 1)"),
+        ("f", "Weight of Process 2 (0 ≤ f ≤ 1);  f=0 gives single-component"),
+        ("EISF1(Q)", "EISF of Process 1 — select model in fitting sheet dropdown"),
+        ("EISF2(Q)", "EISF of Process 2 — select model in fitting sheet dropdown"),
+        ("(1−p)", "Immobile fraction — always contributes EISF = 1"),
+    ]):
+        ws.cell(r_c + 2 + i, 1).value = sym
+        ws.cell(r_c + 2 + i, 1).font  = Font(name="Arial", size=10, bold=True)
+        ws.cell(r_c + 2 + i, 2).value = meaning
+        ws.cell(r_c + 2 + i, 2).font  = Font(name="Arial", size=10)
+        ws.merge_cells(f"B{r_c+2+i}:D{r_c+2+i}")
+
+    ws.sheet_properties.tabColor = "1F4E79"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# build_qens_eisf_sheet()
+# Data collection: all EISF values for all systems, side by side.
+# ════════════════════════════════════════════════════════════════════════════
+def build_qens_eisf_sheet(wb):
+    ws = wb.create_sheet("QENS_EISF")
+    merge_hdr(ws, "A1:U1",
+              "QENS — ELASTIC INCOHERENT STRUCTURE FACTOR  A0(Q)", C_HDR)
+    for col in range(1, 23):
+        ws.column_dimensions[get_column_letter(col)].width = 13
+
+    for idx, (sname, slong, zeolite, molecule, qgrid) in enumerate(SYSTEMS):
+        c0   = idx * 7 + 1
+        sc   = get_column_letter(c0)
+        ec   = get_column_letter(c0 + 6)
+        ws.merge_cells(f"{sc}2:{ec}2")
+        style_header(ws[f"{sc}2"], slong, C_SUBHDR)
+        style_subhdr(ws.cell(3, c0), "Q (Å⁻¹)")
+        for i, h in enumerate(
+            ["290K A0","290K err","330K A0","330K err","370K A0","370K err"], 1
+        ):
+            style_subhdr(ws.cell(3, c0 + i), h)
+        for qi, q in enumerate(qgrid):
+            style_fix(ws.cell(4 + qi, c0), q)
+            ws.cell(4 + qi, c0).number_format = "0.000000"
+            for dc in range(1, 7):
+                style_inp(ws.cell(4 + qi, c0 + dc))
+
+    ws.sheet_properties.tabColor = "70AD47"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# build_qens_hwhm_sheet()
+# Data collection: all HWHM values — now with error columns.
+# ════════════════════════════════════════════════════════════════════════════
+def build_qens_hwhm_sheet(wb):
+    ws = wb.create_sheet("QENS_HWHM")
+    # 4 columns per temperature (data + error for G1 and G2)
+    # plus Q column = 13 columns per system
+    merge_hdr(ws, "A1:AK1",
+              "QENS — LORENTZIAN HWHM  Γ(Q)  [meV]  (with error columns)", C_HDR)
+    for col in range(1, 44):
+        ws.column_dimensions[get_column_letter(col)].width = 11
+
+    for idx, (sname, slong, zeolite, molecule, qgrid) in enumerate(SYSTEMS):
+        c0   = idx * 13 + 1
+        sc   = get_column_letter(c0)
+        ec   = get_column_letter(c0 + 12)
+        ws.merge_cells(f"{sc}2:{ec}2")
+        style_header(ws[f"{sc}2"], slong, C_SUBHDR)
+        style_subhdr(ws.cell(3, c0), "Q (Å⁻¹)")
+        cols = [
+            "290K Γ1","290K Γ1 err",
+            "290K Γ2","290K Γ2 err",
+            "330K Γ1","330K Γ1 err",
+            "330K Γ2","330K Γ2 err",
+            "370K Γ1","370K Γ1 err",
+            "370K Γ2","370K Γ2 err",
+        ]
+        for i, h in enumerate(cols, 1):
+            style_subhdr(ws.cell(3, c0 + i), h)
+        for qi, q in enumerate(qgrid):
+            style_fix(ws.cell(4 + qi, c0), q)
+            ws.cell(4 + qi, c0).number_format = "0.000000"
+            for dc in range(1, 13):
+                style_inp(ws.cell(4 + qi, c0 + dc))
+
+    ws.sheet_properties.tabColor = "70AD47"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# build_md_eisf_sheet()
+# ════════════════════════════════════════════════════════════════════════════
+def build_md_eisf_sheet(wb):
+    ws = wb.create_sheet("MD_EISF")
+    merge_hdr(ws, "A1:U1",
+              "MD SIMULATION — ELASTIC INCOHERENT STRUCTURE FACTOR  A0(Q)", C_HDR)
+    for col in range(1, 23):
+        ws.column_dimensions[get_column_letter(col)].width = 13
+
+    for si, (sname, slong, _, _, _) in enumerate(SYSTEMS):
+        c0 = si * 7 + 1
+        sc = get_column_letter(c0); ec = get_column_letter(c0 + 6)
+        ws.merge_cells(f"{sc}2:{ec}2")
+        style_header(ws[f"{sc}2"], slong, C_SUBHDR)
+        style_subhdr(ws.cell(3, c0), "Q (Å⁻¹)")
+        for i, h in enumerate(
+            ["290K A0","290K err","330K A0","330K err","370K A0","370K err"], 1
+        ):
+            style_subhdr(ws.cell(3, c0 + i), h)
+        for qi, q in enumerate(Q_MD):
+            style_fix(ws.cell(4 + qi, c0), q)
+            ws.cell(4 + qi, c0).number_format = "0.000000"
+            for dc in range(1, 7):
+                style_inp(ws.cell(4 + qi, c0 + dc))
+
+    ws.sheet_properties.tabColor = "ED7D31"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# build_md_isf_sheet()
+# ════════════════════════════════════════════════════════════════════════════
+def build_md_isf_sheet(wb):
+    ws = wb.create_sheet("MD_ISF")
+    end_col = get_column_letter(2 + len(SYSTEMS) * 20)
+    merge_hdr(ws, f"A1:{end_col}1",
+              "MD SIMULATION — INTERMEDIATE SCATTERING FUNCTION  F(Q,t)  [0 to ~66 ps]",
+              C_HDR)
+    style_subhdr(ws.cell(2, 1), "t (ps)")
+    ws.column_dimensions["A"].width = 10
+
+    for si, (sname, slong, _, _, _) in enumerate(SYSTEMS):
+        c0 = 2 + si * 20
+        sc = get_column_letter(c0); ec = get_column_letter(c0 + 18)
+        ws.merge_cells(f"{sc}2:{ec}2")
+        style_header(ws[f"{sc}2"], slong, C_SUBHDR)
+        for qi, q in enumerate(Q_MD):
+            c = ws.cell(3, c0 + qi)
+            style_subhdr(c, f"Q={q:.1f}")
+            ws.column_dimensions[get_column_letter(c0 + qi)].width = 9
+
+    # log-spaced time axis 0.01 → 66 ps
+    t_vals = [
+        round(0.01 * (66 / 0.01) ** (math.log(i + 1) / math.log(41)), 4)
+        for i in range(40)
+    ]
+    for ti, t in enumerate(t_vals):
+        r = 4 + ti
+        style_fix(ws.cell(r, 1), t)
+        ws.cell(r, 1).number_format = "0.0000"
+        for si in range(len(SYSTEMS)):
+            c0 = 2 + si * 20
+            for qi in range(19):
+                style_inp(ws.cell(r, c0 + qi))
+
+    ws.cell(46, 1).value = "← Add more time rows as needed"
+    ws.cell(46, 1).font  = Font(name="Arial", size=9, italic=True, color="777777")
+    ws.sheet_properties.tabColor = "ED7D31"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# build_comparison_sheet()
+# ════════════════════════════════════════════════════════════════════════════
+def build_comparison_sheet(wb):
+    ws = wb.create_sheet("Comparison")
+    merge_hdr(ws, "A1:N1",
+              "COMPARISON — Fitted Parameters, Arrhenius Analysis, Cross-System Summary",
+              C_HDR)
+    ws.column_dimensions["A"].width = 26
+    ws.column_dimensions["B"].width = 20
+    for i in range(3, 15):
+        ws.column_dimensions[get_column_letter(i)].width = 13
+
+    # Arrhenius
+    merge_hdr(ws, "A2:N2",
+              "ARRHENIUS ANALYSIS  —  ln(Γ) vs 1000/T", C_SUBHDR)
+    for ci, h in enumerate(
+        ["System","Process",
+         "1000/T 290K","1000/T 330K","1000/T 370K",
+         "ln(Γ) 290K","ln(Γ) 330K","ln(Γ) 370K",
+         "Ea (meV)","Ea (kJ/mol)","ln(Γ0)","Notes"], 1
+    ):
+        style_subhdr(ws.cell(3, ci), h)
+
+    kB = 0.08617
+    arr_rows = []
+    for _, slong, _, _, _ in SYSTEMS:
+        arr_rows += [(slong, "Process 1 (Γ1)"), (slong, "Process 2 (Γ2)")]
+
+    for ri, (sys, proc) in enumerate(arr_rows):
+        r = 4 + ri
+        for ci, val in enumerate([sys, proc], 1):
+            c = ws.cell(r, ci)
+            c.value = val; c.font = Font(name="Arial", size=10)
+            c.border = bdr(); c.alignment = lft()
+        for ci2, T in enumerate([290, 330, 370], 3):
+            c = ws.cell(r, ci2)
+            style_fix(c, round(1000 / T, 6))
+            c.number_format = "0.000000"
+        for col in [6, 7, 8]:
+            style_inp(ws.cell(r, col))
+        l1=f"F{r}";l2=f"G{r}";l3=f"H{r}"
+        t1=f"C{r}";t2=f"D{r}";t3=f"E{r}"
+        ea = ws.cell(r, 9)
+        ea.value = f"=IFERROR(-{kB}*1000*SLOPE({l1}:{l3},{t1}:{t3}),\"\")"
+        style_calc(ea); ea.number_format = "0.0"
+        kj = ws.cell(r, 10)
+        kj.value = f"=IFERROR(I{r}*0.09648,\"\")"
+        style_calc(kj); kj.number_format = "0.00"
+        ic = ws.cell(r, 11)
+        ic.value = f"=IFERROR(INTERCEPT({l1}:{l3},{t1}:{t3}),\"\")"
+        style_calc(ic)
+
+    ws.sheet_properties.tabColor = "C00000"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# MAIN — build everything and save
+# ════════════════════════════════════════════════════════════════════════════
+def main():
+    wb = Workbook()
+
+    # Build sheets in order
+    build_systems_sheet(wb)
+    build_models_sheet(wb)
+
+    # Placeholder sheets that fitting sheets insert before
+    wb.create_sheet("QENS_EISF")
+    wb.create_sheet("QENS_HWHM")
+    wb.create_sheet("MD_EISF")
+    wb.create_sheet("MD_ISF")
+    wb.create_sheet("Comparison")
+
+    # Build fitting sheets — they insert themselves before QENS_EISF
+    for sname, slong, zeolite, molecule, qgrid in SYSTEMS:
+        build_fit_sheet(wb, sname, slong, zeolite, molecule, qgrid,
+                        insert_before="QENS_EISF")
+
+    # Now build the data and comparison sheets properly
+    # (remove the placeholder sheets first)
+    for name in ["QENS_EISF", "QENS_HWHM", "MD_EISF", "MD_ISF", "Comparison"]:
+        del wb[name]
+
+    build_qens_eisf_sheet(wb)
+    build_qens_hwhm_sheet(wb)
+    build_md_eisf_sheet(wb)
+    build_md_isf_sheet(wb)
+    build_comparison_sheet(wb)
+
+    # Tab colours for data/comparison sheets
+    for name, colour in [
+        ("Systems",  "1F4E79"), ("Models", "1F4E79"),
+        ("QENS_EISF","70AD47"), ("QENS_HWHM","70AD47"),
+        ("MD_EISF",  "ED7D31"), ("MD_ISF","ED7D31"),
+        ("Comparison","C00000"),
+    ]:
+        if name in wb.sheetnames:
+            wb[name].sheet_properties.tabColor = colour
+
+    wb.save(OUTPUT_PATH)
+    print(f"Saved: {OUTPUT_PATH}")
+    print(f"Sheets: {wb.sheetnames}")
+
+
+if __name__ == "__main__":
+    main()
