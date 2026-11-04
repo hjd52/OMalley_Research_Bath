@@ -10,6 +10,8 @@ import matplotlib.pyplot as plt # for plotting the data
 from matplotlib.ticker import MaxNLocator # used to make the plots less messy
 
 
+####### USER INPUT SECTION ########
+
 filename = tkinter.filedialog.askopenfilename()
 tkinter.Tk().withdraw() # this code allows us to select files
 #this saves headaches when inputting filepaths 
@@ -20,11 +22,13 @@ rows = f.read() # plug each row into a long str
 
 f.close() # close the file 
 
+
+
+########### Reading data and Reading Number of Steps ##############################
+
 #Obtaining our Values and Steps from the str
 
-pattern = re.compile(r'(?:[+-]?\d+\.\d+E[+-]\d+\s+){37}[+-]?\d+\.\d+E[+-]\d+') 
-#the above pattern identifies all of the values in ONE step
-chunked_values = re.findall(pattern,rows) # this uses the pattern to identify all of values
+
 
 pattern_2 = re.compile(r'^[ \t]*\d+[ \t]+[+-]?\d+\.\d+E[+-]\d+[ \t]+\d+[ \t]*$', re.MULTILINE)
 #the above pattern identifies the step label 
@@ -32,7 +36,7 @@ chunked_steps = pattern_2.findall(rows) # this uses pattern to identify the step
 
 
 
-#####INSERT USER DEFINED FUNCTIONS BELOW######
+######### INSERT USER DEFINED FUNCTIONS BELOW #####################################
 
 # #Producing a list of lists with each term separated into string
 def str_splitter(chunked_list):  
@@ -76,40 +80,51 @@ def value_steps_dataframe(value):
         
     df = pd.DataFrame({'steps':col_steps,'value':col_value})
     
+    
+    
+    #The section below exists as the regex returns a str which caused bugs below fixed 04/11/25
+    df['steps'] = pd.to_numeric(df['steps'], errors="coerce")
+    df['value'] = pd.to_numeric(df['value'], errors="coerce")
+    
+    
     return df
             
-def lazy_plot(df,name):
+def lazy_plot(df, name):
     """
-    This function exists to make the rest of my code neater and easier to follow
-    
-    df = the dataframe produced by value_steps_dataframe
-    
+    df  = the dataframe produced by value_steps_dataframe
     name = the title of the plot being produced
+    
     """
+    
     
     fig, ax = plt.subplots()
+    
 
-    plt.scatter(df["steps"], df["value"])
-    
-    
+    ax.scatter(df["steps"], df["value"])
+
     ax.set_title(name)
+    
+    ax.yaxis.set_major_locator(MaxNLocator(15))
+    ax.xaxis.set_major_locator(MaxNLocator(5))
 
-    ax.yaxis.set_major_locator(MaxNLocator(5))
-    ax.xaxis.set_major_locator(MaxNLocator(10))
-
-    return plt.show()
-
-
+    plt.show()
 
 
-######Proccessing using defined functions#######
 
-unchunked_values = str_splitter(chunked_values) # spliting "value blocks into single vals"
+
+####################### Proccessing using defined functions ###############################
+
 
 unchunked_steps = str_splitter(chunked_steps) # "splitting step-time-number of values into individ values  "
 
+number_of_vals = int(unchunked_steps[0][2])
 
 
+pattern = re.compile(rf'(?:[+-]?\d+\.\d+E[+-]\d+\s+){{{number_of_vals-1}}}[+-]?\d+\.\d+E[+-]\d+') 
+#the above pattern identifies all of the values in ONE step
+chunked_values = re.findall(pattern,rows) # this uses the pattern to identify all of values
+
+unchunked_values = str_splitter(chunked_values) # spliting "value blocks into single vals"
 
 
 #####INSERT SYSTEM RELEVANT VALUES BELOW#####
@@ -148,13 +163,35 @@ lazy_plot(system_T,"system temp")
 
 
 #This section is for things relevant to a NPT simulation
-if int(unchunked_steps[0][0]) > 38:
+
+if number_of_vals > 38:
     
-    unit_cell_change = value_steps_dataframe(40)
+    
+    
+    
+    
+    #### Unit Cell Volume Change 
+    
+    unit_cell_change = value_steps_dataframe(18)
  
-    lazy_plot(unit_cell_change,"unit cell variation")
+    lazy_plot(unit_cell_change,"System Volume")
 
 
+
+
+
+############# Stats Bit #################
+
+stats = []
+
+stats.append("systemE")
+stats.append(system_E["value"].describe())
+
+stats.append("systemT")
+stats.append(system_T["value"].describe())
+
+stats.append("systemV")
+stats.append(unit_cell_change["value"].describe())
 
 
 
